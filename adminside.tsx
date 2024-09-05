@@ -1,225 +1,296 @@
 "use client";
-import AssistanceIcon from "@/components/icons/AssistanceIcon";
-import CloseIcon from "@/components/icons/CloseIcon";
-import SendIcon from "@/components/icons/SendIcon";
 import { useState, useEffect, useRef } from "react";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   collection,
-  addDoc,
   query,
   orderBy,
-  onSnapshot,
   getDocs,
+  addDoc,
+  onSnapshot,
+  updateDoc,
+  where,
   doc,
-  setDoc,
-  getDoc,
+  QuerySnapshot,
+  DocumentData,
 } from "firebase/firestore";
-import { db } from "@/utils/firebase/firebase";
-import { getCookieInClientSide } from "@/utils/cognito/utils/client";
+import { db } from "../../../services/firebase";
+import SendIcon from "@/components/ui/SendIcon";
+
+interface Message {
+  sender: string;
+  message: string;
+  createdAt: any;
+}
+
+interface MessageUser {
+  userId?: string;
+  id: string;
+  status: string;
+  newMessage: boolean;
+}
+
+const subscribeToMessages = (
+  selectedUser: string | null,
+  setMessages: React.Dispatch<React.SetStateAction<Message[]>>
+) => {
+  if (!selectedUser) return;
+
+  const q = query(
+    collection(db, `userChats/${selectedUser}/messages`),
+    orderBy("createdAt", "asc")
+  );
+
+  const unsubscribe = onSnapshot(
+    q,
+    (querySnapshot: QuerySnapshot<DocumentData>) => {
+      const msgs: Message[] = [];
+      querySnapshot.forEach((doc) => {
+        msgs.push(doc.data() as Message);
+      });
+      setMessages(msgs);
+    }
+  );
+
+  return unsubscribe;
+};
 
 const YourPcAssistant = () => {
-  const [openAssistanceChat, setOpenAssistanceChat] = useState<boolean>(false);
-  const [messages, setMessages] = useState<any[]>([]);
-  const [newMessage, setNewMessage] = useState<string>("");
-  const [sessionId, setSessionId] = useState<string | null>(null);
-  const messagesEndRef = useRef<HTMLDivElement>(null);
-  const userData = getCookieInClientSide("userData");
-
-  let user: any;
-  if (userData) {
-    user = JSON.parse(userData);
-  }
-
-  const chatSessionsCollectionRef = collection(db, "chatSessions");
-  const chatCollectionRef = sessionId
-    ? collection(db, `chatSessions/${sessionId}/messages`)
-    : null;
-
-  const createNewChatSession = async () => {
-    const newSessionDoc = await addDoc(chatSessionsCollectionRef, {
-      userId: user.payload.userName,
-      createdAt: new Date(),
-      status:"active"
-    });
-    setSessionId(newSessionDoc.id);
-  };
-
-  const checkAndCreateChatSession = async () => {
-    const q = query(chatSessionsCollectionRef, orderBy("createdAt", "asc"));
-    const querySnapshot = await getDocs(q);
-    let sessionFound = false;
-    
-    querySnapshot.forEach((doc) => {
-      if (
-        doc.data().userId === user.payload.userName &&
-        doc.data().status === "active"
-      ) {
-        setSessionId(doc.id);
-        sessionFound = true;
-      }
-    });
-
-    if (!sessionFound) {
-      await createNewChatSession();
-    }
-  };
-
+  const [selectedUser, setSelectedUser] = useState<string | null>(null);
+  const [newMessage, setNewMessage] = useState("");
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [selectedUserName, setSelectedUserName] = useState<string>("");
+  const queryClient = useQueryClient();
+  const messagesEndRef = useRef<HTMLUListElement | null>(null);
   useEffect(() => {
-    const initializeChat = async () => {
-      await checkAndCreateChatSession();
+    const unsubscribeUsers = subscribeToUsers();
+
+    return () => {
+      unsubscribeUsers();
     };
-    initializeChat();
   }, []);
 
-  useEffect(() => {
-    if (sessionId && chatCollectionRef) {
-      const q = query(chatCollectionRef, orderBy("createdAt", "asc"));
-      const unsubscribe = onSnapshot(q, (querySnapshot) => {
-        const msgs: any[] = [];
-        querySnapshot.forEach((doc) => {
-          msgs.push(doc.data());
-        });
-        setMessages(msgs);
-      });
-
-      return () => unsubscribe();
+  const { data: users = [], isLoading: usersLoading } = useQuery<MessageUser[]>(
+    {
+      queryKey: ["users"],
+      queryFn: () => fetchUsers(),
     }
-  }, [sessionId]);
+  );
+  const subscribeToUsers = () => {
+    const q = query(collection(db, "userChats"));
+
+    return onSnapshot(q, (querySnapshot: QuerySnapshot<DocumentData>) => {
+      const usersList: MessageUser[] = [];
+      querySnapshot.forEach((doc) => {
+        usersList.push({ id: doc.id, ...doc.data() } as MessageUser);
+      });
+      queryClient.setQueryData<MessageUser[]>(["users"], usersList);
+    });
+  };
+  const messageQuery = useQuery<Message[]>({
+    queryKey: ["messages", selectedUser],
+    queryFn: () => fetchMessages(selectedUser),
+    enabled: !!selectedUser,
+  });
+
+  useEffect(() => {
+    if (messageQuery.data) {
+      setMessages(messageQuery.data);
+    }
+  }, [messageQuery.data]);
+
+  const fetchUsers = async (): Promise<MessageUser[]> => {
+    const q = query(collection(db, "userChats"));
+    const querySnapshot = await getDocs(q);
+    const usersList: MessageUser[] = [];
+    querySnapshot.forEach((doc) => {
+      usersList.push({ id: doc.id, ...doc.data() } as MessageUser);
+    });
+    console.log(usersList);
+    return usersList;
+  };
+
+  const fetchMessages = async (
+    selectedUser: string | null
+  ): Promise<Message[]> => {
+    if (!selectedUser) return [];
+    const q = query(
+      collection(db, `userChats/${selectedUser}/messages`),
+      orderBy("createdAt", "asc")
+    );
+    const querySnapshot = await getDocs(q);
+    const messages: Message[] = [];
+    querySnapshot.forEach((doc) => {
+      messages.push(doc.data() as Message);
+    });
+    return messages;
+  };
+
+  const sendMessageMutation = useMutation({
+    mutationFn: async (message: string) => {
+      if (!selectedUser) throw new Error("No user selected");
+      await updateDoc(doc(db, "userChats", selectedUser), {
+        newMessage: false,
+      });
+      await addDoc(collection(db, `userChats/${selectedUser}/messages`), {
+        message: message,
+        createdAt: new Date(),
+        sender: "admin",
+      });
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["messages", selectedUser] });
+    },
+  });
+
+  const handleSendMessage = () => {
+    if (newMessage.trim() === "") return;
+    sendMessageMutation.mutate(newMessage);
+    setNewMessage("");
+  };
+
+  useEffect(() => {
+    if (selectedUser) {
+      const unsubscribe = subscribeToMessages(selectedUser, setMessages);
+      return () => unsubscribe && unsubscribe();
+    }
+  }, [selectedUser]);
+
 
   useEffect(() => {
     if (messagesEndRef.current) {
-      messagesEndRef.current.scrollIntoView({ behavior: "smooth" });
+      messagesEndRef.current.scrollTop = messagesEndRef.current.scrollHeight;
     }
   }, [messages]);
-
-  const handleSendMessage = async () => {
-    if (newMessage.trim() === "" || !chatCollectionRef) return;
-
-    try {
-      await addDoc(chatCollectionRef, {
-        message: newMessage,
-        createdAt: new Date(),
-        sender: "user",
-      });
-      setNewMessage("");
-    } catch (error) {
-      console.error("Error adding document: ", error);
-    }
-  };
-
+  
   return (
-    <>
-      <div
-        className="p-2 sm:px-5 sm:py-3 flex items-center gap-2 sm:gap-5 border border-black/20 rounded-xl sm:rounded-3xl cursor-pointer active:bg-secondary"
-        onClick={() => setOpenAssistanceChat(!openAssistanceChat)}
-      >
-        <div className="relative p-1 sm:p-2 lg:p-3 border border-black/20 rounded-lg sm:rounded-3xl">
-          <AssistanceIcon
-            width={41}
-            height={41}
-            className="w-3 h-3 sm:w-9 sm:h-9"
-          />
-          <div className="h-[6px] w-[6px] sm:h-3 sm:w-3 lg:h-4 lg:w-4 bg-red-500 rounded-full absolute top-0 right-0"></div>
-        </div>
-        <p className="font-bold text-[0.81rem] sm:text-[1rem] lg:text-[1.2rem]">
-          Your PC Assistant
-        </p>
-      </div>
-
-      <aside
-        className={`fixed z-[50] bottom-0 right-0 sm:right-10 w-[100vw] sm:w-[400px] h-[90vh] sm:h-[600px] bg-white overflow-hidden rounded-2xl border-2 border-black/20 px-2 pb-1 flex flex-col transform transition-all ease-out duration-500 ${
-          openAssistanceChat ? "translate-y-0" : "translate-y-full"
-        }`}
-      >
-        <header className="p-2 sm:px-5 sm:py-3 flex items-center justify-between gap-2 sm:gap-5 border-b border-black/20">
-          <div className="flex items-center gap-2">
-            <div className="relative p-1 sm:p-2 border border-black/20 rounded-lg sm:rounded-2xl">
-              <AssistanceIcon
-                width={41}
-                height={41}
-                className="w-3 h-3 sm:w-5 sm:h-5"
-              />
-            </div>
-            <p className="font-bold text-[0.81rem] sm:text-[1rem]">
-              Your PC Assistant
-            </p>
-          </div>
-          <div
-            className="cursor-pointer"
-            onClick={() => setOpenAssistanceChat(!openAssistanceChat)}
-          >
-            <CloseIcon className="w-8 h-8" />
-          </div>
+    <div className="flex w-full top-0 bottom-0 py-2 md:py-4 ">
+      <aside className="w-1/4 bg-white h-screen border-r border-gray-300">
+        <header className="p-4 border-b border-gray-300 flex justify-between items-center bg-indigo-600 text-white">
+          <h1 className="text-2xl font-semibold">Customer Chat</h1>
         </header>
-        <div className="flex-1 overflow-auto pb-20">
-          <ul className="flex flex-col gap-5 py-3 h-full overflow-auto">
-            <p className="text-[0.6rem] text-smokey-grey font-medium leading-none text-center">
-              Today
-            </p>
-            {messages
-              .filter(
-                (message) =>
-                  message.sender === "admin" || message.sender === "user"
-              )
-              .map((message, index) => (
-                <li
-                  key={index}
-                  className={`flex ${
-                    message.sender === "user" ? "justify-end" : "justify-start"
-                  } gap-2`}
+
+        <div className="overflow-y-auto p-3 mb-9 pb-20">
+          {usersLoading ? (
+            <div className="w-full h-full flex items-center justify-center">
+              No chats Initiated
+            </div>
+          ) : (
+            users
+              .filter((user) => user.status !== "closed")
+              .map((user) => (
+                <div
+                  key={user.id}
+                  className={`flex items-center mb-4 cursor-pointer hover:bg-gray-100 p-2 rounded-md ${
+                    user.newMessage && "bg-green-300/40"
+                  }`}
+                  onClick={() => {
+                    setSelectedUser(user.id);
+                    setSelectedUserName(user.userId ?? "");
+                  }}
                 >
-                  {message.sender === "admin" && (
-                    <div className="self-end bg-[rgba(228,160,37,0.15)] p-3 rounded-full">
-                      <AssistanceIcon className="w-3 h-3 sm:w-4 sm:h-4 fill-primary" />
-                    </div>
-                  )}
-                  <div className=" leading-none flex flex-col gap-1">
-                    <p
-                      className={`w-fit text-sm rounded-md ${
-                        message.sender === "user"
-                          ? "bg-primary text-white"
-                          : "bg-secondary border text-smokey-grey"
-                      } font-medium py-3 px-4 m-0`}
-                    >
-                      {message.message}
-                    </p>
-                    <div className="w-full flex items-center">
-                      <p className="relative text-[0.5rem] text-smokey-grey font-medium leading-none">
-                        {message.sender === "user"
-                          ? "You"
-                          : message.sender === "admin" && "Your PC Assistant"}
-                      </p>
-                      <p className="text-[0.5rem] text-smokey-grey font-medium leading-none ml-2">
-                        {new Date(
-                          message.createdAt.seconds * 1000
-                        ).toLocaleTimeString()}
-                      </p>
-                    </div>
+                  <div className="flex-1">
+                    <h2 className="text-lg font-semibold">
+                      {user?.userId?.split("@")[0]}
+                    </h2>
                   </div>
-                </li>
-              ))}
-            <div ref={messagesEndRef} />
-          </ul>
+                </div>
+              ))
+          )}
         </div>
-        <section className="chat-input w-full h-auto absolute left-0 bottom-0 bg-white px-2 py-1">
-          <div className="bg-secondary py-1 px-5 w-full rounded-xl flex gap-1 items-center">
-            <textarea
-              className="border-none outline-none text-sm resize-none pt-4 pl-3 h-[50px] w-full bg-transparent"
-              required
-              placeholder="Enter your message..."
+      </aside>
+
+      {selectedUser ? (
+        <article className="bg-secondary   py-5 border border-black/30 max-h-screen flex flex-col justify-between h-screen w-full">
+          {selectedUser && (
+            <header className="flex items-center justify-between px-3 sm:px-8 gap-3 pb-3 border-b border-black/30">
+              <h4 className="font-bold text-base sm:text-xl">
+                {selectedUserName}
+              </h4>
+              <button
+                onClick={() => {
+                  setSelectedUser(null);
+                  setSelectedUserName("");
+                  setMessages([]);
+                  setNewMessage("");
+                }}
+                className="bg-red-500 text-white px-4 py-2 rounded-md"
+              >
+                X
+              </button>
+            </header>
+          )}
+
+          <div className="flex-1 overflow-auto px-3 sm:px-8">
+            <ul
+              className="flex flex-col gap-5 py-3 h-full overflow-auto"
+              ref={messagesEndRef}
+            >
+              {messages.length !== 0 &&
+                messages.map((message, index) => (
+                  <li
+                    key={index}
+                    className={`flex mb-4 ${
+                      message.sender === "admin" ? "justify-end" : ""
+                    } cursor-pointer`}
+                  >
+                    <div className="leading-none flex flex-col gap-1">
+                      <p
+                        className={`w-fit text-sm rounded-md ${
+                          message.sender === "admin"
+                            ? "bg-[#e4a025] text-white"
+                            : "bg-[rgba(18, 18, 18, 0.04)] border text-[#757575]"
+                        } font-medium py-3 px-4 m-0`}
+                      >
+                        {message.message}
+                      </p>
+                      <div className="w-full flex items-center">
+                        <p className="relative text-[0.5rem] text-smokey-grey font-medium leading-none">
+                          {message.sender === "admin"
+                            ? "You"
+                            : message.sender === "user" && "user"}
+                        </p>
+                        <p className="text-[0.5rem] text-smokey-grey font-medium leading-none ml-2">
+                          {new Date(
+                            message.createdAt.seconds * 1000
+                          ).toLocaleTimeString()}
+                        </p>
+                      </div>
+                    </div>
+                  </li>
+                ))}
+            </ul>
+          </div>
+          <footer className="relative">
+            <input
+              type="text"
+              className="bg-white rounded-xl w-full h-14 px-5"
               value={newMessage}
               onChange={(e) => setNewMessage(e.target.value)}
-            ></textarea>
-            <span
-              className="self-center bg-primary p-2 rounded-full cursor-pointer"
-              onClick={handleSendMessage}
-            >
-              <SendIcon width={22} height={19} />
-            </span>
-          </div>
-        </section>
-      </aside>
-    </>
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  handleSendMessage();
+                }
+              }}
+              placeholder="Enter your message..."
+            />
+            <div className="absolute inset-y-0 right-0 flex items-center gap-3 pr-5">
+              <button
+                className="bg-[#e4a025] p-2 rounded-full cursor-pointer"
+                onClick={handleSendMessage}
+              >
+                <SendIcon className="w-[20px] h-[20px]" />
+              </button>
+            </div>
+          </footer>
+        </article>
+      ) : (
+        <div className="w-full flex items-center justify-center text-3xl ">
+          Select a user to chat
+        </div>
+      )}
+    </div>
   );
 };
 
